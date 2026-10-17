@@ -2808,3 +2808,14 @@ body.dark-mode .ccsia-illustration-card {
     .ccsia-illustrations-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
     .ccsia-illustration-card img { height: 105px; }
 }
+.message img,
+.message-content img,
+.markdown-body img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    max-height: 320px;
+    object-fit: contain;
+    margin: 12px auto;
+    border-radius: 12px;
+}
