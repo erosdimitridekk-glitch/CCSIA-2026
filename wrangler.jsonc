@@ -2,7 +2,7 @@
 {
   "$schema": "https://json.schemastore.org/wrangler",
   "name": "ccsia-2026",
-  "main": "./cloudflare-worker/workers.js",
+  "main": "./cloudflare-worker/worker.js",
   "compatibility_date": "2026-10-17",
   "assets": {
     "directory": "./frontend",
