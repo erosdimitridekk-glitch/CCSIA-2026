@@ -499,4 +499,485 @@ function createCopyButton(text) {
    CONTROLE DE ROLAGEM
    ========================================== */
 
-function isNearBottom
+function isNearBottom() {
+    return (
+        chatContent.scrollHeight -
+        chatContent.scrollTop -
+        chatContent.clientHeight
+    ) < 100;
+}
+
+/*
+ * Acompanha o final somente se a pessoa já estiver
+ * perto do final. Nunca força a rolagem quando ela
+ * subiu para ler mensagens anteriores.
+ */
+function followBottomIfNeeded(shouldFollow) {
+    if (shouldFollow) {
+        chatContent.scrollTop = chatContent.scrollHeight;
+    }
+}
+
+/* ==========================================
+   ADICIONAR MENSAGEM
+   ========================================== */
+
+function addMessage(text, type, save = false) {
+    const message = document.createElement("div");
+    message.classList.add("message", type);
+
+    const content = document.createElement("div");
+    content.className = "message-content";
+
+    const name = document.createElement("div");
+    name.className = "message-name";
+    name.textContent = type === "ai" ? "CCSIA" : "Você";
+
+    const textElement = document.createElement("div");
+    textElement.className = "message-text";
+
+    if (type === "ai") {
+        textElement.innerHTML = formatAIResponse(text);
+    } else {
+        textElement.textContent = text;
+    }
+
+    content.append(name, textElement);
+
+    if (type === "ai") {
+        content.appendChild(createCopyButton(text));
+    }
+
+    message.append(createAvatar(type), content);
+    chatContent.appendChild(message);
+
+    if (save) {
+        saveMessage(type === "ai" ? "ai" : "user", text);
+    }
+
+    return message;
+}
+
+/* ==========================================
+   RESPOSTA COM EFEITO DE DIGITAÇÃO
+   ========================================== */
+
+async function addTypingMessage(text, type, token) {
+    const shouldFollow = isNearBottom();
+
+    const message = document.createElement("div");
+    message.classList.add("message", type);
+
+    const content = document.createElement("div");
+    content.className = "message-content";
+
+    const name = document.createElement("div");
+    name.className = "message-name";
+    name.textContent = "CCSIA";
+
+    const textElement = document.createElement("div");
+    textElement.className = "message-text";
+
+    content.append(name, textElement);
+    message.append(createAvatar(type), content);
+    chatContent.appendChild(message);
+
+    let currentText = "";
+    const speed = 12;
+
+    for (let index = 0; index < text.length; index++) {
+        if (token !== generationToken) {
+            message.remove();
+            return null;
+        }
+
+        currentText += text[index];
+        textElement.innerHTML = formatAIResponse(currentText);
+
+        /*
+         * Recalcula se a pessoa ainda está perto do final.
+         * Se ela rolou para cima, não a puxa de volta.
+         */
+        followBottomIfNeeded(shouldFollow && isNearBottom());
+
+        await new Promise(resolve => setTimeout(resolve, speed));
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+
+    actions.appendChild(createCopyButton(text));
+
+    const regenerateButton = document.createElement("button");
+    regenerateButton.className = "regenerate-button";
+    regenerateButton.type = "button";
+    regenerateButton.textContent = "↻ Regenerar resposta";
+
+    regenerateButton.addEventListener("click", () => {
+        if (lastUserQuestion && !isGenerating) {
+            regenerateLastAnswer();
+        }
+    });
+
+    actions.appendChild(regenerateButton);
+    content.appendChild(actions);
+
+    saveMessage("ai", text);
+
+    return message;
+}
+
+/* ==========================================
+   INDICADOR DE CARREGAMENTO
+   ========================================== */
+
+function addLoadingMessage() {
+    const message = document.createElement("div");
+    message.className = "message ai";
+
+    const content = document.createElement("div");
+    content.className = "message-content";
+
+    const name = document.createElement("div");
+    name.className = "message-name";
+    name.textContent = "CCSIA";
+
+    const text = document.createElement("div");
+    text.className = "message-text";
+
+    const typing = document.createElement("div");
+    typing.className = "typing";
+
+    for (let i = 0; i < 3; i++) {
+        typing.appendChild(document.createElement("span"));
+    }
+
+    text.appendChild(typing);
+    content.append(name, text);
+    message.append(createAvatar("ai"), content);
+    chatContent.appendChild(message);
+
+    return message;
+}
+
+/* ==========================================
+   PARAR E REGENERAR
+   ========================================== */
+
+function updateSendButton() {
+    if (isGenerating) {
+        sendButton.textContent = "■";
+        sendButton.classList.add("is-stopping");
+        sendButton.setAttribute("aria-label", "Parar resposta");
+        sendButton.title = "Parar resposta";
+    } else {
+        sendButton.textContent = "➤";
+        sendButton.classList.remove("is-stopping");
+        sendButton.setAttribute("aria-label", "Enviar pergunta");
+        sendButton.title = "Enviar pergunta";
+    }
+}
+
+function stopGeneration() {
+    if (!isGenerating) return;
+
+    generationToken++;
+
+    if (activeController) {
+        activeController.abort();
+    }
+
+    activeController = null;
+    isGenerating = false;
+    updateSendButton();
+
+    document.querySelectorAll(".typing").forEach(element => {
+        element.closest(".message")?.remove();
+    });
+}
+
+async function regenerateLastAnswer() {
+    if (!lastUserQuestion || isGenerating) return;
+
+    const conversation = getCurrentConversation();
+
+    if (conversation) {
+        const messages = conversation.messages;
+
+        if (messages.length && messages[messages.length - 1].role === "ai") {
+            messages.pop();
+            saveConversations(
+                getConversations().map(item =>
+                    item.id === conversation.id ? conversation : item
+                )
+            );
+        }
+    }
+
+    await sendMessage(true);
+}
+
+/* ==========================================
+   ENVIAR MENSAGEM COM CONTEXTO
+   ========================================== */
+
+async function sendMessage(isRegeneration = false) {
+    if (isGenerating) {
+        stopGeneration();
+        return;
+    }
+
+    const message = isRegeneration
+        ? lastUserQuestion
+        : messageInput.value.trim();
+
+    if (!message) return;
+
+    lastUserQuestion = message;
+
+    const welcome = document.getElementById("welcome");
+    if (welcome) welcome.remove();
+
+    if (!isRegeneration) {
+        addMessage(message, "user", true);
+        messageInput.value = "";
+        resetTextarea();
+    }
+
+    /*
+     * Captura as mensagens anteriores à pergunta atual.
+     * Como a pergunta atual já foi salva, removemos a
+     * última mensagem para não enviá-la duas vezes.
+     */
+    const context = getConversationContext();
+
+    if (
+        context.length &&
+        context[context.length - 1].role === "user" &&
+        context[context.length - 1].content === message
+    ) {
+        context.pop();
+    }
+
+    isGenerating = true;
+    generationToken++;
+
+    const thisToken = generationToken;
+    activeController = new AbortController();
+
+    updateSendButton();
+
+    const loadingMessage = addLoadingMessage();
+
+    try {
+        const response = await fetch("/api/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                message,
+                history: context
+            }),
+            signal: activeController.signal
+        });
+
+        const data = await response.json();
+
+        if (thisToken !== generationToken) return;
+
+        loadingMessage.remove();
+
+        if (!response.ok) {
+            addMessage(
+                data.error || "Desculpe, ocorreu um erro ao falar com a CCSIA.",
+                "ai"
+            );
+
+            console.error("Erro da CCSIA:", data);
+            return;
+        }
+
+        await addTypingMessage(data.answer, "ai", thisToken);
+
+    } catch (error) {
+        if (error.name === "AbortError" || thisToken !== generationToken) {
+            return;
+        }
+
+        console.error("Erro ao conectar à CCSIA:", error);
+
+        if (loadingMessage.isConnected) {
+            loadingMessage.remove();
+        }
+
+        addMessage(
+            "Não consegui conectar ao servidor da CCSIA. Verifique sua conexão e tente novamente.",
+            "ai"
+        );
+
+    } finally {
+        if (thisToken === generationToken) {
+            isGenerating = false;
+            activeController = null;
+            updateSendButton();
+        }
+    }
+}
+
+/* ==========================================
+   CAMPO DE TEXTO E ENVIO
+   ========================================== */
+
+messageInput.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+    }
+});
+
+sendButton.addEventListener("click", () => {
+    if (isGenerating) {
+        stopGeneration();
+    } else {
+        sendMessage();
+    }
+});
+
+messageInput.addEventListener("input", function () {
+    this.style.height = "auto";
+    this.style.height = Math.min(this.scrollHeight, 120) + "px";
+});
+
+function resetTextarea() {
+    messageInput.style.height = "auto";
+}
+
+/* ==========================================
+   SUGESTÕES DE PERGUNTAS
+   ========================================== */
+
+document.addEventListener("click", event => {
+    const suggestion = event.target.closest(".suggestion");
+    if (!suggestion) return;
+
+    messageInput.value = suggestion.dataset.question || "";
+    messageInput.focus();
+    messageInput.dispatchEvent(new Event("input"));
+});
+
+/* ==========================================
+   NOVA CONVERSA
+   ========================================== */
+
+newChatButton.addEventListener("click", () => {
+    if (isGenerating) stopGeneration();
+
+    currentConversationId = null;
+    localStorage.removeItem(CURRENT_KEY);
+
+    chatContent.innerHTML = "";
+    showWelcome();
+    renderHistory();
+    closeMobileMenu();
+
+    messageInput.value = "";
+    resetTextarea();
+    messageInput.focus();
+});
+
+/* ==========================================
+   MENU MOBILE
+   ========================================== */
+
+function openMobileMenu() {
+    sidebar?.classList.add("mobile-open");
+    menuOverlay?.classList.add("active");
+}
+
+function closeMobileMenu() {
+    sidebar?.classList.remove("mobile-open");
+    menuOverlay?.classList.remove("active");
+}
+
+menuButton?.addEventListener("click", openMobileMenu);
+closeMenuButton?.addEventListener("click", closeMobileMenu);
+menuOverlay?.addEventListener("click", closeMobileMenu);
+
+/* ==========================================
+   TEMA CLARO E ESCURO
+   ========================================== */
+
+function updateThemeButton() {
+    if (!themeButton) return;
+
+    const darkMode = document.body.classList.contains("dark-mode");
+
+    themeButton.textContent = darkMode ? "☀️" : "🌙";
+    themeButton.title = darkMode ? "Modo claro" : "Modo escuro";
+    themeButton.setAttribute(
+        "aria-label",
+        darkMode ? "Ativar modo claro" : "Ativar modo escuro"
+    );
+}
+
+themeButton?.addEventListener("click", () => {
+    document.body.classList.toggle("dark-mode");
+
+    const darkMode = document.body.classList.contains("dark-mode");
+
+    localStorage.setItem("ccsia-theme", darkMode ? "dark" : "light");
+    updateThemeButton();
+});
+
+if (localStorage.getItem("ccsia-theme") === "dark") {
+    document.body.classList.add("dark-mode");
+}
+
+updateThemeButton();
+
+/* Atalho Ctrl + Shift + D para alternar o tema. */
+document.addEventListener("keydown", event => {
+    if (
+        event.ctrlKey &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "d"
+    ) {
+        themeButton?.click();
+    }
+});
+
+/* ==========================================
+   CARREGAR CONVERSA SALVA
+   ========================================== */
+
+function loadSavedConversation() {
+    const conversation = getCurrentConversation();
+
+    if (!conversation) {
+        renderHistory();
+
+        if (!document.getElementById("welcome")) {
+            showWelcome();
+        }
+
+        return;
+    }
+
+    chatContent.innerHTML = "";
+
+    conversation.messages.forEach(message => {
+        addMessage(
+            message.content,
+            message.role === "ai" ? "ai" : "user"
+        );
+    });
+
+    renderHistory();
+}
+
+/* ==========================================
+   INICIALIZAÇÃO
+   ========================================== */
+
+loadSavedConversation();
