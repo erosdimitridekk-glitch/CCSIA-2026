@@ -43,6 +43,11 @@ const HISTORY_KEY =
 const CURRENT_KEY =
     "ccsia-current-conversation";
 
+let activeController = null;
+let generationToken = 0;
+let isGenerating = false;
+let lastUserQuestion = "";
+
 
 let currentConversationId =
     localStorage.getItem(
@@ -776,113 +781,94 @@ function showWelcome() {
 /* FORMATAÇÃO DA IA */
 /* ================================= */
 
-function formatAIResponse(text) {
-
-    let formatted =
-        text
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-
-
-    formatted =
-        formatted.replace(
-            /^### (.+)$/gm,
-            "<h3>$1</h3>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /^## (.+)$/gm,
-            "<h2>$1</h2>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /^# (.+)$/gm,
-            "<h1>$1</h1>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /\*\*(.+?)\*\*/g,
-            "<strong>$1</strong>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /(?<!\*)\*([^*\n]+)\*(?!\*)/g,
-            "<em>$1</em>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /`([^`]+)`/g,
-            "<code>$1</code>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /^[•\-] (.+)$/gm,
-            "<li>$1</li>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /(<li>.*<\/li>\n?)+/g,
-            function(match) {
-
-                return (
-                    "<ul>" +
-                    match +
-                    "</ul>"
-                );
-
-            }
-        );
-
-
-    formatted =
-        formatted.replace(
-            /\n/g,
-            "<br>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /(<\/h[1-3]>)<br>/g,
-            "$1"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /<br><ul>/g,
-            "<ul>"
-        );
-
-
-    formatted =
-        formatted.replace(
-            /<\/ul><br>/g,
-            "</ul>"
-        );
-
-
-    return formatted;
-
+function escapeHTML(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
+function formatInlineMarkdown(value) {
+    let safe = escapeHTML(value);
+    safe = safe.replace(/`([^`]+)`/g, "<code>$1</code>");
+    safe = safe.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    safe = safe.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>");
+    return safe;
+}
 
-/* ================================= */
+function formatAIResponse(text) {
+    const lines = String(text || "").replace(/\r/g, "").split("\n");
+    const output = [];
+    let paragraph = [];
+    let listType = null;
+    let listItems = [];
+
+    function flushParagraph() {
+        if (paragraph.length) {
+            output.push("<p>" + paragraph.map(formatInlineMarkdown).join("<br>") + "</p>");
+            paragraph = [];
+        }
+    }
+    function flushList() {
+        if (listItems.length) {
+            output.push("<" + listType + ">" + listItems.map(item => "<li>" + formatInlineMarkdown(item) + "</li>").join("") + "</" + listType + ">");
+            listItems = [];
+            listType = null;
+        }
+    }
+    function parseCells(line) {
+        return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
+    }
+    function isTableDivider(line) {
+        const cells = parseCells(line);
+        return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell.replace(/\s/g, "")));
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const next = lines[i + 1] || "";
+        if (line.includes("|") && next.includes("|") && isTableDivider(next)) {
+            flushParagraph(); flushList();
+            const headers = parseCells(line);
+            i += 1;
+            const rows = [];
+            while (i + 1 < lines.length && lines[i + 1].includes("|") && lines[i + 1].trim() !== "") {
+                i += 1;
+                const cells = parseCells(lines[i]);
+                if (isTableDivider(lines[i])) continue;
+                rows.push(cells);
+            }
+            const head = "<thead><tr>" + headers.map(c => "<th>" + formatInlineMarkdown(c) + "</th>").join("") + "</tr></thead>";
+            const body = "<tbody>" + rows.map(row => "<tr>" + headers.map((_, index) => "<td>" + formatInlineMarkdown(row[index] || "") + "</td>").join("") + "</tr>").join("") + "</tbody>";
+            output.push('<div class="table-wrap"><table>' + head + body + '</table></div>');
+            continue;
+        }
+        if (!line.trim()) { flushParagraph(); flushList(); continue; }
+        const heading = line.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+            flushParagraph(); flushList();
+            const level = heading[1].length;
+            output.push("<h" + level + ">" + formatInlineMarkdown(heading[2]) + "</h" + level + ">");
+            continue;
+        }
+        const bullet = line.match(/^\s*[-*•]\s+(.+)$/);
+        const numbered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+        if (bullet || numbered) {
+            flushParagraph();
+            const nextType = numbered ? "ol" : "ul";
+            if (listType && listType !== nextType) flushList();
+            listType = nextType;
+            listItems.push((bullet || numbered)[1]);
+            continue;
+        }
+        flushList();
+        paragraph.push(line);
+    }
+    flushParagraph(); flushList();
+    return output.join("");
+}/* ================================= */
 /* AVATAR */
 /* ================================= */
 
@@ -1171,6 +1157,7 @@ async function addTypingMessage(
     text,
     type
 ) {
+    const myToken = generationToken;
 
     const message =
         document.createElement(
@@ -1263,6 +1250,10 @@ async function addTypingMessage(
         i < text.length;
         i++
     ) {
+        if (myToken !== generationToken) {
+            message.remove();
+            return null;
+        }
 
         currentText +=
             text[i];
@@ -1289,12 +1280,18 @@ async function addTypingMessage(
     }
 
 
-    content.appendChild(
-        createCopyButton(
-            text
-        )
-    );
-
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+    actions.appendChild(createCopyButton(text));
+    const regenerateButton = document.createElement("button");
+    regenerateButton.className = "regenerate-button";
+    regenerateButton.type = "button";
+    regenerateButton.textContent = "↻ Regenerar resposta";
+    regenerateButton.addEventListener("click", () => {
+        if (lastUserQuestion) regenerateLastAnswer();
+    });
+    actions.appendChild(regenerateButton);
+    content.appendChild(actions);
 
     saveMessage(
         "ai",
@@ -1445,136 +1442,94 @@ function addLoadingMessage() {
 /* ENVIAR */
 /* ================================= */
 
-async function sendMessage() {
+function updateSendButton() {
+    if (isGenerating) {
+        sendButton.textContent = "■";
+        sendButton.classList.add("is-stopping");
+        sendButton.setAttribute("aria-label", "Parar resposta");
+        sendButton.title = "Parar resposta";
+    } else {
+        sendButton.textContent = "➤";
+        sendButton.classList.remove("is-stopping");
+        sendButton.setAttribute("aria-label", "Enviar pergunta");
+        sendButton.title = "Enviar pergunta";
+    }
+}
 
-    const message =
-        messageInput.value.trim();
+function stopGeneration() {
+    if (!isGenerating) return;
+    generationToken++;
+    if (activeController) activeController.abort();
+    activeController = null;
+    isGenerating = false;
+    updateSendButton();
+    const loading = document.querySelector(".message.ai .typing")?.closest(".message");
+    if (loading) loading.remove();
+}
 
+async function regenerateLastAnswer() {
+    if (!lastUserQuestion || isGenerating) return;
+    messageInput.value = lastUserQuestion;
+    await sendMessage(true);
+}
 
-    if (!message) {
+async function sendMessage(isRegeneration = false) {
+    if (isGenerating) {
+        stopGeneration();
         return;
     }
 
+    const message = isRegeneration ? lastUserQuestion : messageInput.value.trim();
+    if (!message) return;
+    lastUserQuestion = message;
 
-    const existingWelcome =
-        document.getElementById(
-            "welcome"
-        );
+    const existingWelcome = document.getElementById("welcome");
+    if (existingWelcome) existingWelcome.remove();
 
-
-    if (existingWelcome) {
-
-        existingWelcome.remove();
-
+    if (!isRegeneration) {
+        addMessage(message, "user", true);
+        messageInput.value = "";
+        resetTextarea();
     }
 
-
-    /*
-       Salva a pergunta.
-       Se não existir conversa,
-       cria automaticamente.
-    */
-
-    addMessage(
-        message,
-        "user",
-        true
-    );
-
-
-    messageInput.value =
-        "";
-
-
-    resetTextarea();
-
-
-    sendButton.disabled =
-        true;
-
-
-    const loadingMessage =
-        addLoadingMessage();
-
+    isGenerating = true;
+    generationToken++;
+    const thisToken = generationToken;
+    activeController = new AbortController();
+    updateSendButton();
+    const loadingMessage = addLoadingMessage();
 
     try {
-
-        const apiConfig = window.CCSIA_CONFIG || {};
-        const apiBaseUrl = String(apiConfig.apiBaseUrl || "").replace(/\/$/, "");
-        const apiPath = apiConfig.apiPath || "/api/chat";
-
-        if (!apiBaseUrl) {
-            throw new Error("A URL do Cloudflare Worker não foi configurada em config.js.");
-        }
-
-        const response = await fetch(`${apiBaseUrl}${apiPath}`, {
+        const response = await fetch("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ message }),
+            signal: activeController.signal
         });
-
-        const rawResponse = await response.text();
-        let data;
-        try {
-            data = rawResponse ? JSON.parse(rawResponse) : {};
-        } catch {
-            throw new Error(`O servidor retornou uma resposta inválida (HTTP ${response.status}).`);
-        }
-
-
+        const data = await response.json();
+        if (thisToken !== generationToken) return;
         loadingMessage.remove();
-
 
         if (!response.ok) {
-
-            const serverMessage = data?.error || data?.message || `Erro HTTP ${response.status}.`;
-            addMessage(
-                `Não consegui obter uma resposta da CCSIA. ${serverMessage}`,
-                "ai"
-            );
-
-
-            console.error(
-                data
-            );
-
-
+            addMessage(data.error || "Desculpe, ocorreu um erro ao falar com a CCSIA.", "ai");
+            console.error("Erro da CCSIA:", data);
             return;
-
         }
 
-
-        await addTypingMessage(
-            data.answer,
-            "ai"
-        );
-
-
+        await addTypingMessage(data.answer, "ai");
     } catch (error) {
-
-        console.error("Erro ao conectar à API da CCSIA:", error);
-
-
-
-        loadingMessage.remove();
-
-
-        const detail = error?.message || "Falha de rede ou bloqueio de CORS.";
-        await addTypingMessage(
-            `Não consegui conectar ao servidor da CCSIA. ${detail} Confira a URL em frontend/config.js e se o Worker permite requisições do site.`,
-            "ai"
-        );
-
-
+        if (error.name === "AbortError" || thisToken !== generationToken) return;
+        console.error("Erro ao conectar à CCSIA:", error);
+        if (loadingMessage.isConnected) loadingMessage.remove();
+        await addTypingMessage("Não consegui conectar ao servidor da CCSIA. Verifique sua conexão e tente novamente.", "ai");
     } finally {
-
-        sendButton.disabled =
-            false;
-
+        if (thisToken === generationToken) {
+            isGenerating = false;
+            activeController = null;
+            updateSendButton();
+        }
     }
-
 }
-
 
 /* ================================= */
 /* TEXTAREA */
@@ -1599,10 +1554,10 @@ messageInput.addEventListener(
 );
 
 
-sendButton.addEventListener(
-    "click",
-    sendMessage
-);
+sendButton.addEventListener("click", () => {
+    if (isGenerating) stopGeneration();
+    else sendMessage();
+});
 
 
 messageInput.addEventListener(
